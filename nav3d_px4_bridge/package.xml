@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>nav3d_px4_bridge</name>
+  <version>0.1.0</version>
+  <description>PX4 bridge for VIO/odometry and TF</description>
+  <maintainer email="salvatoredelpeschio@gmail.com">Salvatore Del Peschio</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>nav_msgs</depend>
+  <depend>px4_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>geometry_msgs</depend>
+  <depend>eigen</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
