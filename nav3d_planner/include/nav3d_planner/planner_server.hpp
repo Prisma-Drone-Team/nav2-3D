@@ -8,12 +8,18 @@
 #include <unordered_map>
 #include <vector>
 
+#include "rmw/rmw.h"
+
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "nav_msgs/msg/path.hpp"
 
 #include "nav3d_core/global_planner.hpp"
+#include "nav3d_core/path_validity_checker.hpp"
 #include "nav3d_core/planner_exceptions.hpp"
+
 #include "nav3d_msgs/action/compute_path_to_pose.hpp"
+#include "nav3d_msgs/srv/is_path_valid.hpp"
+
 #include "nav3d_util/lifecycle_node.hpp"
 #include "nav3d_util/simple_action_server.hpp"
 
@@ -57,6 +63,11 @@ protected:
 
   void publishPlan(const nav_msgs::msg::Path & path);
 
+  void isPathValid(
+    const std::shared_ptr<rmw_request_id_t> request_header,
+    const std::shared_ptr<nav3d_msgs::srv::IsPathValid::Request> request,
+    std::shared_ptr<nav3d_msgs::srv::IsPathValid::Response> response);
+
 private:
   pluginlib::ClassLoader<nav3d_core::GlobalPlanner> planner_loader_;
   std::vector<std::string> planner_ids_;
@@ -69,11 +80,14 @@ private:
 
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr plan_publisher_;
 
+  rclcpp::Service<nav3d_msgs::srv::IsPathValid>::SharedPtr is_path_valid_srv_;
+
   std::string global_frame_{"map"};
   std::string robot_base_frame_{"base_link"};
   double transform_tolerance_{0.1};
 
   double expected_planner_frequency_{1.0};
+  std::string path_validity_planner_id_{};
   double action_server_result_timeout_{10.0};
 
   nav3d_core::GlobalPlanner::Ptr getPlannerOrThrow(const std::string & planner_id);
