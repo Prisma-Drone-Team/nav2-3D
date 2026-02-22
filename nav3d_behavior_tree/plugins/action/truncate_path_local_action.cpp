@@ -35,10 +35,18 @@ BT::NodeStatus TruncatePathLocal::tick()
   double angular_distance_weight = 0.0;
   double max_robot_pose_search_dist = std::numeric_limits<double>::infinity();
 
+  std::string mode = "local";
+  double resample_distance = 0.0;
+  int max_output_poses = 0;
+
   getInput("distance_forward", distance_forward);
   getInput("distance_backward", distance_backward);
   getInput("angular_distance_weight", angular_distance_weight);
   getInput("max_robot_pose_search_dist", max_robot_pose_search_dist);
+
+  getInput("mode", mode);
+  getInput("resample_distance", resample_distance);
+  getInput("max_output_poses", max_output_poses);
 
   const bool path_pruning = std::isfinite(max_robot_pose_search_dist);
   nav_msgs::msg::Path new_path;
@@ -76,13 +84,34 @@ BT::NodeStatus TruncatePathLocal::tick()
   auto forward_pose_it = nav3d_util::geometry_utils::first_after_integrated_distance(
     current_pose, path_.poses.end(), distance_forward);
 
-  auto backward_pose_it = nav3d_util::geometry_utils::first_after_integrated_distance(
-    std::reverse_iterator(current_pose + 1), path_.poses.rend(), distance_backward);
+  if (forward_pose_it == current_pose && (current_pose + 1) != path_.poses.end()) {
+    forward_pose_it = current_pose + 1;
+  }
 
   nav_msgs::msg::Path output_path;
   output_path.header = path_.header;
-  output_path.poses = std::vector<geometry_msgs::msg::PoseStamped>(
-    backward_pose_it.base(), forward_pose_it);
+
+  if (mode == "remaining") {
+    output_path.poses = std::vector<geometry_msgs::msg::PoseStamped>(
+      current_pose, forward_pose_it);
+    if (output_path.poses.empty()) {
+      output_path.poses.push_back(*current_pose);
+    }
+  } else {
+    auto backward_pose_it = nav3d_util::geometry_utils::first_after_integrated_distance(
+      std::reverse_iterator(current_pose + 1), path_.poses.rend(), distance_backward);
+
+    output_path.poses = std::vector<geometry_msgs::msg::PoseStamped>(
+      backward_pose_it.base(), forward_pose_it);
+  }
+
+  if (resample_distance > 0.0) {
+    resamplePath(output_path, resample_distance);
+  }
+
+  if (max_output_poses > 0) {
+    capPath(output_path, max_output_poses);
+  }
 
   setOutput("output_path", output_path);
   return BT::NodeStatus::SUCCESS;
@@ -122,6 +151,7 @@ double TruncatePathLocal::poseDistance(
 {
   const double dx = pose1.pose.position.x - pose2.pose.position.x;
   const double dy = pose1.pose.position.y - pose2.pose.position.y;
+  const double dz = pose1.pose.position.z - pose2.pose.position.z;
 
   tf2::Quaternion q1;
   tf2::convert(pose1.pose.orientation, q1);
@@ -129,7 +159,70 @@ double TruncatePathLocal::poseDistance(
   tf2::convert(pose2.pose.orientation, q2);
 
   const double da = angular_distance_weight * std::abs(q1.angleShortestPath(q2));
-  return std::sqrt(dx * dx + dy * dy + da * da);
+  const double dp = std::sqrt(dx * dx + dy * dy + dz * dz);
+  return std::sqrt(dp * dp + da * da);
+}
+
+void TruncatePathLocal::resamplePath(nav_msgs::msg::Path & path, double spacing_m)
+{
+  if (spacing_m <= 0.0 || path.poses.size() < 3) {
+    return;
+  }
+
+  std::vector<geometry_msgs::msg::PoseStamped> out;
+  out.reserve(path.poses.size());
+  out.push_back(path.poses.front());
+
+  double acc = 0.0;
+  for (size_t i = 1; i < path.poses.size(); ++i) {
+    acc += nav3d_util::geometry_utils::euclidean_distance(path.poses[i - 1], path.poses[i], true);
+    if (acc >= spacing_m || i + 1 == path.poses.size()) {
+      out.push_back(path.poses[i]);
+      acc = 0.0;
+    }
+  }
+
+  path.poses = std::move(out);
+}
+
+void TruncatePathLocal::capPath(nav_msgs::msg::Path & path, int max_poses)
+{
+  if (max_poses <= 0 || static_cast<int>(path.poses.size()) <= max_poses) {
+    return;
+  }
+
+  const size_t n = path.poses.size();
+  const size_t last = n - 1;
+  const size_t keep = static_cast<size_t>(max_poses);
+
+  std::vector<geometry_msgs::msg::PoseStamped> out;
+  out.reserve(keep);
+
+  if (keep == 1) {
+    out.push_back(path.poses[last]);
+    path.poses = std::move(out);
+    return;
+  }
+
+  out.push_back(path.poses.front());
+
+  const double step = static_cast<double>(last) / static_cast<double>(keep - 1);
+  size_t prev = 0;
+
+  for (size_t i = 1; i + 1 < keep; ++i) {
+    size_t idx = static_cast<size_t>(std::round(i * step));
+    if (idx <= prev) {
+      idx = prev + 1;
+    }
+    if (idx >= last) {
+      idx = last - 1;
+    }
+    out.push_back(path.poses[idx]);
+    prev = idx;
+  }
+
+  out.push_back(path.poses[last]);
+  path.poses = std::move(out);
 }
 
 }  // namespace nav3d_behavior_tree
