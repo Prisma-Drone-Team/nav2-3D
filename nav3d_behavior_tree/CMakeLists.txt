@@ -218,6 +218,9 @@ list(APPEND plugin_libs nav3d_goal_checker_selector_bt_node)
 add_library(nav3d_progress_checker_selector_bt_node SHARED plugins/action/progress_checker_selector_node.cpp)
 list(APPEND plugin_libs nav3d_progress_checker_selector_bt_node)
 
+add_library(nav3d_publish_path_action_bt_node SHARED plugins/action/publish_path_action.cpp)
+list(APPEND plugin_libs nav3d_publish_path_action_bt_node)
+
 add_library(nav3d_goal_updated_controller_bt_node SHARED plugins/decorator/goal_updated_controller.cpp)
 list(APPEND plugin_libs nav3d_goal_updated_controller_bt_node)
 

@@ -200,6 +200,12 @@
       <output_port name="selected_progress_checker">Name of the selected progress checker received from the topic subscription</output_port>
     </Action>
 
+    <Action ID="PublishPath">
+      <input_port name="path">Path to publish</input_port>
+      <input_port name="topic_name" default="remaining_plan">Topic name</input_port>
+      <input_port name="queue_size" default="1">Publisher queue size</input_port>
+    </Action>
+
     <Action ID="Spin">
       <input_port name="spin_dist">Spin distance</input_port>
       <input_port name="time_allowance">Allowed time for spinning</input_port>
