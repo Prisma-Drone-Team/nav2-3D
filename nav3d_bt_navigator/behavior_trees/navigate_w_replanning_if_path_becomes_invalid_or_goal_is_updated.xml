@@ -10,7 +10,7 @@
             <Inverter>
               <GlobalUpdatedGoal/>
             </Inverter>
-            <TruncatePathLocal input_path="{path}" output_path="{remaining_path}" robot_frame="base_link" transform_tolerance="0.1" mode="remaining" distance_forward="3.0" distance_backward="0.0" resample_distance="0.8" max_output_poses="60" max_robot_pose_search_dist="3.0"/>
+            <TruncatePathLocal input_path="{path}" output_path="{remaining_path}" robot_frame="base_link" transform_tolerance="0.1" mode="remaining" distance_forward="5.0" distance_backward="0.0" resample_distance="0.0" max_output_poses="60" max_robot_pose_search_dist="3.0"/>
             <PublishPath path="{remaining_path}" topic_name="remaining_plan"/>
             <IsPathValid path="{remaining_path}" service_name="is_path_valid" server_timeout="1000"/>
           </ReactiveSequence>

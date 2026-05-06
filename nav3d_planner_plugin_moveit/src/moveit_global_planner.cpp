@@ -100,7 +100,7 @@ void MoveItGlobalPlanner::configure(
     node_->declare_parameter(name_ + ".workspace.max_y", 10.0);
   }
   if (!node_->has_parameter(name_ + ".workspace.max_z")) {
-    node_->declare_parameter(name_ + ".workspace.max_z", 5.0);
+    node_->declare_parameter(name_ + ".workspace.max_z", 3.0);
   }
 
   planning_group_ = node_->get_parameter(name_ + ".planning_group").as_string();
