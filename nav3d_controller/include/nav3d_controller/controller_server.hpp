@@ -11,11 +11,13 @@
 #include "tf2/utils.h"
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "geometry_msgs/msg/twist.hpp"
 #include "nav_msgs/msg/path.hpp"
 
 #include "nav3d_core/controller.hpp"
 #include "nav3d_msgs/action/follow_path.hpp"
 #include "nav3d_msgs/msg/speed_limit.hpp"
+#include "nav3d_msgs/msg/trajectory_point.hpp"
 #include "nav3d_util/lifecycle_node.hpp"
 #include "nav3d_util/robot_utils.hpp"
 #include "nav3d_util/simple_action_server.hpp"
@@ -46,12 +48,12 @@ protected:
 
   std::unique_ptr<ActionServer> action_server_;
 
-  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr waypoint_pub_;
+  rclcpp::Publisher<nav3d_msgs::msg::TrajectoryPoint>::SharedPtr waypoint_pub_;
 
   void computeControl();
 
   void generateTimedTrajectory(const nav_msgs::msg::Path & path);
-  std::optional<geometry_msgs::msg::PoseStamped> getCurrentWaypoint();
+  std::optional<nav3d_msgs::msg::TrajectoryPoint> getCurrentCommand();
   bool isGoalReached();
 
   rclcpp::Subscription<nav3d_msgs::msg::SpeedLimit>::SharedPtr speed_limit_sub_;
@@ -65,16 +67,20 @@ protected:
   double transform_tolerance_{0.1};
 
   std::string waypoint_topic_{"offboard/waypoint"};
-  double controller_frequency_{10.0};
+  double controller_frequency_{50.0};
 
   double xyz_goal_tolerance_{0.1};
   double yaw_goal_tolerance_{0.1};
 
   double speed_limit_{1.0};
-  double default_speed_limit_{1.0};
+  double default_speed_limit_{0.3};
+
+  double slowdown_distance_{0.3};
+  double min_speed_{0.0};
 
   rclcpp::Time last_valid_cmd_time_;
 
+  rclcpp::Time path_start_time_{0, 0, RCL_ROS_TIME};
   std::vector<std::pair<rclcpp::Time, geometry_msgs::msg::PoseStamped>> current_path_;
   size_t current_waypoint_index_{0};
 

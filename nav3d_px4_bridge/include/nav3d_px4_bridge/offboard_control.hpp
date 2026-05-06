@@ -8,8 +8,9 @@
 #include <string>
 
 #include <geometry_msgs/msg/pose.hpp>
-#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <nav3d_msgs/msg/trajectory_point.hpp>
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_command.hpp>
@@ -38,16 +39,14 @@ private:
 
   struct EnuSetpoint
   {
-    double x{0.0};
-    double y{0.0};
-    double z{0.0};
-    double yaw{0.0};
+    geometry_msgs::msg::Pose pose;
+    geometry_msgs::msg::Twist twist;
   };
 
   void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
   void vehicleStatusCallback(const px4_msgs::msg::VehicleStatus::SharedPtr msg);
   void vehicleLocalPositionCallback(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg);
-  void waypointCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
+  void waypointCallback(const nav3d_msgs::msg::TrajectoryPoint::SharedPtr msg);
 
   void timerCallback();
 
@@ -69,7 +68,7 @@ private:
 
   bool isTakeoffComplete();
 
-  void fillPositionOnlyFields(px4_msgs::msg::TrajectorySetpoint & msg);
+  void fillPositionVelocityFields(px4_msgs::msg::TrajectorySetpoint & msg);
 
   rclcpp::Logger logger_{rclcpp::get_logger("offboard_control")};
 
@@ -80,7 +79,7 @@ private:
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr vehicle_local_pos_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr vehicle_status_sub_;
-  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr waypoint_sub_;
+  rclcpp::Subscription<nav3d_msgs::msg::TrajectoryPoint>::SharedPtr waypoint_sub_;
 
   rclcpp::TimerBase::SharedPtr timer_;
 
@@ -103,7 +102,11 @@ private:
   double altitude_tolerance_{0.1};
 
   std::atomic<uint64_t> offboard_setpoint_counter_{0};
-  double control_rate_hz_{10.0};
+  double control_rate_hz_{50.0};
+  double offboard_warmup_s_{1.0};
+  double offboard_command_retry_s_{1.0};
+  bool offboard_command_sent_{false};
+  rclcpp::Time last_offboard_command_time_{rclcpp::Time(0, 0, RCL_ROS_TIME)};
 
   std::string odom_topic_{"/odom"};
   std::string waypoint_topic_{"/offboard/waypoint"};

@@ -11,27 +11,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(nav3d_msgs REQUIRED)
 find_package(px4_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
-
-add_executable(vio_odometry_bridge src/vio_odometry_bridge.cpp)
-target_include_directories(vio_odometry_bridge PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-)
-target_link_libraries(vio_odometry_bridge Eigen3::Eigen)
-
-ament_target_dependencies(vio_odometry_bridge
-  rclcpp
-  nav_msgs
-  px4_msgs
-  tf2_ros
-  geometry_msgs
-)
 
 add_library(offboard_control_lib
   src/offboard_control.cpp
@@ -42,6 +28,7 @@ target_include_directories(offboard_control_lib PUBLIC
 )
 ament_target_dependencies(offboard_control_lib
   rclcpp
+  nav3d_msgs
   nav_msgs
   px4_msgs
   tf2
@@ -54,7 +41,26 @@ add_executable(offboard_control_node
   src/offboard_control_node.cpp
 )
 target_link_libraries(offboard_control_node offboard_control_lib)
-ament_target_dependencies(offboard_control_node rclcpp)
+ament_target_dependencies(offboard_control_node
+  rclcpp
+  nav3d_msgs
+)
+
+add_executable(vio_odometry_bridge src/vio_odometry_bridge.cpp)
+target_include_directories(vio_odometry_bridge PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(vio_odometry_bridge Eigen3::Eigen)
+ament_target_dependencies(vio_odometry_bridge
+  rclcpp
+  nav_msgs
+  px4_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  geometry_msgs
+)
 
 install(TARGETS
   vio_odometry_bridge

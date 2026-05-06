@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 
 #include <tf2/utils.h>
 
@@ -15,7 +16,7 @@ static rclcpp::QoS px4Qos()
 {
   return rclcpp::QoS(1)
     .reliability(RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT)
-    .durability(RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL)
+    .durability(RMW_QOS_POLICY_DURABILITY_VOLATILE)
     .history(RMW_QOS_POLICY_HISTORY_KEEP_LAST);
 }
 
@@ -23,8 +24,10 @@ OffboardControl::OffboardControl()
 : rclcpp::Node("offboard_control"),
   logger_(get_logger())
 {
-  control_rate_hz_ = declare_parameter<double>("control_rate_hz", 10.0);
+  control_rate_hz_ = declare_parameter<double>("control_rate_hz", 50.0);
   waypoint_timeout_s_ = declare_parameter<double>("waypoint_timeout_s", 1.0);
+  offboard_warmup_s_ = declare_parameter<double>("offboard_warmup_s", 1.0);
+  offboard_command_retry_s_ = declare_parameter<double>("offboard_command_retry_s", 1.0);
   offset_alpha_ = declare_parameter<double>("offset_alpha", 0.01);
 
   takeoff_altitude_ = declare_parameter<double>("takeoff_altitude", 1.0);
@@ -63,8 +66,9 @@ OffboardControl::OffboardControl()
     fmu_out_vehicle_status_, px4Qos(),
     std::bind(&OffboardControl::vehicleStatusCallback, this, _1));
 
-  waypoint_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-    waypoint_topic_, 10, std::bind(&OffboardControl::waypointCallback, this, _1));
+  auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).best_effort().durability_volatile();
+  waypoint_sub_ = create_subscription<nav3d_msgs::msg::TrajectoryPoint>(
+    waypoint_topic_, qos, std::bind(&OffboardControl::waypointCallback, this, _1));
 
   const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
     std::chrono::duration<double>(1.0 / std::max(1e-3, control_rate_hz_)));
@@ -135,58 +139,52 @@ geometry_msgs::msg::Pose OffboardControl::enuToNedPose(const geometry_msgs::msg:
   return ned_pose;
 }
 
-void OffboardControl::fillPositionOnlyFields(px4_msgs::msg::TrajectorySetpoint & msg)
+void OffboardControl::fillPositionVelocityFields(px4_msgs::msg::TrajectorySetpoint & msg)
 {
   const float nan = std::numeric_limits<float>::quiet_NaN();
-  msg.velocity[0] = nan; msg.velocity[1] = nan; msg.velocity[2] = nan;
   msg.acceleration[0] = nan; msg.acceleration[1] = nan; msg.acceleration[2] = nan;
   msg.jerk[0] = nan; msg.jerk[1] = nan; msg.jerk[2] = nan;
   msg.yawspeed = nan;
 }
 
-void OffboardControl::waypointCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+void OffboardControl::waypointCallback(const nav3d_msgs::msg::TrajectoryPoint::SharedPtr msg)
 {
-  const double yaw = tf2::getYaw(msg->pose.orientation);
-
-  last_valid_setpoint_enu_ = EnuSetpoint{
-    msg->pose.position.x,
-    msg->pose.position.y,
-    msg->pose.position.z,
-    yaw
-  };
+  last_valid_setpoint_enu_ = EnuSetpoint{msg->pose, msg->velocity};
   last_waypoint_time_ = get_clock()->now();
 
-  geometry_msgs::msg::Pose enu_pose;
-  enu_pose.position.x = last_valid_setpoint_enu_->x;
-  enu_pose.position.y = last_valid_setpoint_enu_->y;
-  enu_pose.position.z = last_valid_setpoint_enu_->z;
-  tf2::Quaternion q; q.setRPY(0.0, 0.0, last_valid_setpoint_enu_->yaw);
-  enu_pose.orientation = tf2::toMsg(q);
-
-  auto ned_pose = enuToNedPose(enu_pose);
+  auto ned_pose = enuToNedPose(msg->pose);
   ned_pose.position.x += odom_to_px4_offset_.x;
   ned_pose.position.y += odom_to_px4_offset_.y;
   ned_pose.position.z += odom_to_px4_offset_.z;
+
+  const double vx_enu = msg->velocity.linear.x;
+  const double vy_enu = msg->velocity.linear.y;
+  const double vz_enu = msg->velocity.linear.z;
+
+  const float vx_ned = static_cast<float>(vy_enu);
+  const float vy_ned = static_cast<float>(vx_enu);
+  const float vz_ned = static_cast<float>(-vz_enu);
 
   current_waypoint_ned_ = std::make_shared<px4_msgs::msg::TrajectorySetpoint>();
   current_waypoint_ned_->position[0] = static_cast<float>(ned_pose.position.x);
   current_waypoint_ned_->position[1] = static_cast<float>(ned_pose.position.y);
   current_waypoint_ned_->position[2] = static_cast<float>(ned_pose.position.z);
 
-  tf2::Quaternion ned_q;
-  tf2::fromMsg(ned_pose.orientation, ned_q);
-  double rr, pp, yy;
-  tf2::Matrix3x3(ned_q).getRPY(rr, pp, yy);
-  current_waypoint_ned_->yaw = static_cast<float>(yy);
+  current_waypoint_ned_->velocity[0] = vx_ned;
+  current_waypoint_ned_->velocity[1] = vy_ned;
+  current_waypoint_ned_->velocity[2] = vz_ned;
 
-  fillPositionOnlyFields(*current_waypoint_ned_);
+  const double yaw_ned = tf2::getYaw(ned_pose.orientation);
+  current_waypoint_ned_->yaw = static_cast<float>(yaw_ned);
+
+  fillPositionVelocityFields(*current_waypoint_ned_);
 }
 
 void OffboardControl::publishOffboardControlHeartbeat()
 {
   px4_msgs::msg::OffboardControlMode msg{};
   msg.position = true;
-  msg.velocity = false;
+  msg.velocity = true;
   msg.acceleration = false;
   msg.attitude = false;
   msg.body_rate = false;
@@ -241,28 +239,31 @@ void OffboardControl::publishTakeoffSetpoint()
   }
 
   if (!takeoff_start_enu_) {
-    takeoff_start_enu_ = EnuSetpoint{
-      current_odom_->pose.pose.position.x,
-      current_odom_->pose.pose.position.y,
-      current_odom_->pose.pose.position.z,
-      0.0
-    };
-    takeoff_target_altitude_ = takeoff_start_enu_->z + takeoff_altitude_;
+    takeoff_start_enu_.emplace();
+    takeoff_start_enu_->pose.position.x = current_odom_->pose.pose.position.x;
+    takeoff_start_enu_->pose.position.y = current_odom_->pose.pose.position.y;
+    takeoff_start_enu_->pose.position.z = current_odom_->pose.pose.position.z;
+    takeoff_start_enu_->pose.orientation = current_odom_->pose.pose.orientation;
+
+    auto & q = takeoff_start_enu_->pose.orientation;
+    const double q_norm = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    if (q_norm > 1e-6) {
+      q.x /= q_norm;
+      q.y /= q_norm;
+      q.z /= q_norm;
+      q.w /= q_norm;
+    } else {
+      tf2::Quaternion identity;
+      identity.setRPY(0.0, 0.0, 0.0);
+      q = tf2::toMsg(identity);
+    }
+
+    takeoff_target_altitude_ = takeoff_start_enu_->pose.position.z + takeoff_altitude_;
   }
 
-  EnuSetpoint enu_sp = *takeoff_start_enu_;
-  enu_sp.z = takeoff_target_altitude_.value();
-  enu_sp.yaw = 0.0;
-
-  last_valid_setpoint_enu_ = enu_sp;
-  last_waypoint_time_ = get_clock()->now();
-
-  geometry_msgs::msg::Pose enu_pose;
-  enu_pose.position.x = enu_sp.x;
-  enu_pose.position.y = enu_sp.y;
-  enu_pose.position.z = enu_sp.z;
-  tf2::Quaternion q; q.setRPY(0.0, 0.0, 0.0);
-  enu_pose.orientation = tf2::toMsg(q);
+  geometry_msgs::msg::Pose enu_pose = takeoff_start_enu_->pose;
+  enu_pose.position.z = takeoff_target_altitude_.value();
+  last_valid_setpoint_enu_ = EnuSetpoint{enu_pose, geometry_msgs::msg::Twist{}};
 
   auto ned_pose = enuToNedPose(enu_pose);
   ned_pose.position.x += odom_to_px4_offset_.x;
@@ -274,13 +275,13 @@ void OffboardControl::publishTakeoffSetpoint()
   msg.position[1] = static_cast<float>(ned_pose.position.y);
   msg.position[2] = static_cast<float>(ned_pose.position.z);
 
-  tf2::Quaternion ned_q;
-  tf2::fromMsg(ned_pose.orientation, ned_q);
-  double rr, pp, yy;
-  tf2::Matrix3x3(ned_q).getRPY(rr, pp, yy);
-  msg.yaw = static_cast<float>(yy);
+  msg.velocity[0] = 0.0f;
+  msg.velocity[1] = 0.0f;
+  msg.velocity[2] = 0.0f;
 
-  fillPositionOnlyFields(msg);
+  msg.yaw = static_cast<float>(tf2::getYaw(ned_pose.orientation));
+  fillPositionVelocityFields(msg);
+
   msg.timestamp = get_clock()->now().nanoseconds() / 1000;
   traj_setpoint_pub_->publish(msg);
 }
@@ -307,14 +308,7 @@ void OffboardControl::publishHoverSetpoint()
     return;
   }
 
-  geometry_msgs::msg::Pose enu_pose;
-  enu_pose.position.x = last_valid_setpoint_enu_->x;
-  enu_pose.position.y = last_valid_setpoint_enu_->y;
-  enu_pose.position.z = last_valid_setpoint_enu_->z;
-  tf2::Quaternion q; q.setRPY(0.0, 0.0, last_valid_setpoint_enu_->yaw);
-  enu_pose.orientation = tf2::toMsg(q);
-
-  auto ned_pose = enuToNedPose(enu_pose);
+  auto ned_pose = enuToNedPose(last_valid_setpoint_enu_->pose);
   ned_pose.position.x += odom_to_px4_offset_.x;
   ned_pose.position.y += odom_to_px4_offset_.y;
   ned_pose.position.z += odom_to_px4_offset_.z;
@@ -324,47 +318,62 @@ void OffboardControl::publishHoverSetpoint()
   msg.position[1] = static_cast<float>(ned_pose.position.y);
   msg.position[2] = static_cast<float>(ned_pose.position.z);
 
-  tf2::Quaternion ned_q;
-  tf2::fromMsg(ned_pose.orientation, ned_q);
-  double rr, pp, yy;
-  tf2::Matrix3x3(ned_q).getRPY(rr, pp, yy);
-  msg.yaw = static_cast<float>(yy);
+  msg.velocity[0] = 0.0f;
+  msg.velocity[1] = 0.0f;
+  msg.velocity[2] = 0.0f;
 
-  fillPositionOnlyFields(msg);
+  msg.yaw = static_cast<float>(tf2::getYaw(ned_pose.orientation));
+  fillPositionVelocityFields(msg);
+
   msg.timestamp = get_clock()->now().nanoseconds() / 1000;
   traj_setpoint_pub_->publish(msg);
 }
 
 void OffboardControl::timerCallback()
 {
+  const auto now = get_clock()->now();
+
   publishOffboardControlHeartbeat();
 
   if (!current_odom_) {
     return;
   }
 
-  if (offboard_setpoint_counter_ == 10) {
+  const bool has_fresh_waypoint =
+    current_waypoint_ned_ && (get_clock()->now() - last_waypoint_time_).seconds() < waypoint_timeout_s_;
+
+  if (has_fresh_waypoint) {
+    current_waypoint_ned_->timestamp = get_clock()->now().nanoseconds() / 1000;
+    traj_setpoint_pub_->publish(*current_waypoint_ned_);
+  } else if (isTakeoffComplete()) {
+    publishHoverSetpoint();
+  } else {
+    publishTakeoffSetpoint();
+  }
+
+  const auto warmup_count = static_cast<uint64_t>(
+    std::ceil(std::max(0.0, offboard_warmup_s_) * std::max(1e-3, control_rate_hz_)));
+  const uint64_t required_setpoints = std::max<uint64_t>(1, warmup_count);
+
+  if (offboard_setpoint_counter_ < required_setpoints) {
+    offboard_setpoint_counter_++;
+    return;
+  }
+
+  const bool is_offboard =
+    vehicle_status_.nav_state == px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD;
+  const bool is_armed =
+    vehicle_status_.arming_state == px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED;
+  const double retry_period_s = std::max(0.1, offboard_command_retry_s_);
+  const bool retry_due =
+    !offboard_command_sent_ ||
+    (now - last_offboard_command_time_).seconds() >= retry_period_s;
+
+  if ((!is_offboard || !is_armed) && retry_due) {
     engageOffboardMode();
     arm();
-  }
-
-  if (vehicle_status_.nav_state == px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD) {
-    const bool has_fresh_waypoint =
-      current_waypoint_ned_ &&
-      (get_clock()->now() - last_waypoint_time_).seconds() < waypoint_timeout_s_;
-
-    if (has_fresh_waypoint) {
-      current_waypoint_ned_->timestamp = get_clock()->now().nanoseconds() / 1000;
-      traj_setpoint_pub_->publish(*current_waypoint_ned_);
-    } else if (isTakeoffComplete()) {
-      publishHoverSetpoint();
-    } else {
-      publishTakeoffSetpoint();
-    }
-  }
-
-  if (offboard_setpoint_counter_ < 11) {
-    offboard_setpoint_counter_++;
+    offboard_command_sent_ = true;
+    last_offboard_command_time_ = now;
   }
 }
 
