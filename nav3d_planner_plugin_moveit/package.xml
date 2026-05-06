@@ -5,7 +5,7 @@
   <version>0.1.0</version>
   <description>MoveIt2-based global planner plugin for nav3d_planner</description>
   <maintainer email="salvatoredelpeschio@gmail.com">Salvatore Del Peschio</maintainer>
-  <license>MIT</license>
+  <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
