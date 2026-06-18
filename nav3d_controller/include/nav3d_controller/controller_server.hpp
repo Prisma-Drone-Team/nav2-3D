@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <Eigen/Dense>
 
 #include "angles/angles.h"
 #include "tf2/utils.h"
@@ -83,6 +84,36 @@ protected:
   rclcpp::Time path_start_time_{0, 0, RCL_ROS_TIME};
   std::vector<std::pair<rclcpp::Time, geometry_msgs::msg::PoseStamped>> current_path_;
   size_t current_waypoint_index_{0};
+
+  // ---- Filtro di riferimento (nuovo) ----
+  struct ReferenceState
+  {
+    Eigen::Vector3d pos{0.0, 0.0, 0.0};
+    Eigen::Vector3d vel{0.0, 0.0, 0.0};
+    Eigen::Vector3d acc{0.0, 0.0, 0.0};
+    double yaw{0.0};
+    double yaw_vel{0.0};
+    double yaw_acc{0.0};
+  };
+
+  ReferenceState ref_state_;
+  bool filter_initialized_{false};
+
+  // Parametri del filtro
+  double ref_jerk_max_{0.35};
+  double ref_acc_max_{0.75};
+  double ref_vel_max_{1.5};
+  double ref_omega_{1.0};
+  double ref_zita_{0.5};
+  double ref_yaw_jerk_max_{0.35};
+  double ref_yaw_acc_max_{0.75};
+  double ref_yaw_vel_max_{1.5};
+
+  void resetFilter(const geometry_msgs::msg::Pose & start_pose);
+  void updateFilter(const geometry_msgs::msg::Pose & target_pose,
+                    const geometry_msgs::msg::Twist & target_vel,
+                    double dt);
+  nav3d_msgs::msg::TrajectoryPoint getFilteredSetpoint();
 
   double getSpeedLimit() const { return speed_limit_; }
 };

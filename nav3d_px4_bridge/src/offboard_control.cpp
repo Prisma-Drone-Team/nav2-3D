@@ -142,9 +142,9 @@ geometry_msgs::msg::Pose OffboardControl::enuToNedPose(const geometry_msgs::msg:
 void OffboardControl::fillPositionVelocityFields(px4_msgs::msg::TrajectorySetpoint & msg)
 {
   const float nan = std::numeric_limits<float>::quiet_NaN();
-  msg.acceleration[0] = nan; msg.acceleration[1] = nan; msg.acceleration[2] = nan;
+  // msg.acceleration[0] = nan; msg.acceleration[1] = nan; msg.acceleration[2] = nan;
   msg.jerk[0] = nan; msg.jerk[1] = nan; msg.jerk[2] = nan;
-  msg.yawspeed = nan;
+  // msg.yawspeed = nan;
 }
 
 void OffboardControl::waypointCallback(const nav3d_msgs::msg::TrajectoryPoint::SharedPtr msg)
@@ -161,9 +161,17 @@ void OffboardControl::waypointCallback(const nav3d_msgs::msg::TrajectoryPoint::S
   const double vy_enu = msg->velocity.linear.y;
   const double vz_enu = msg->velocity.linear.z;
 
+  const double accx_enu = msg->acceleration.linear.x;
+  const double accy_enu = msg->acceleration.linear.y;
+  const double accz_enu = msg->acceleration.linear.z;
+
   const float vx_ned = static_cast<float>(vy_enu);
   const float vy_ned = static_cast<float>(vx_enu);
   const float vz_ned = static_cast<float>(-vz_enu);
+
+  const float accx_ned = static_cast<float>(accy_enu);
+  const float accy_ned = static_cast<float>(accx_enu);
+  const float accz_ned = static_cast<float>(-accz_enu);
 
   current_waypoint_ned_ = std::make_shared<px4_msgs::msg::TrajectorySetpoint>();
   current_waypoint_ned_->position[0] = static_cast<float>(ned_pose.position.x);
@@ -174,8 +182,14 @@ void OffboardControl::waypointCallback(const nav3d_msgs::msg::TrajectoryPoint::S
   current_waypoint_ned_->velocity[1] = vy_ned;
   current_waypoint_ned_->velocity[2] = vz_ned;
 
+  current_waypoint_ned_->acceleration[0] = accx_ned;
+  current_waypoint_ned_->acceleration[1] = accy_ned;
+  current_waypoint_ned_->acceleration[2] = accz_ned;
+
   const double yaw_ned = tf2::getYaw(ned_pose.orientation);
   current_waypoint_ned_->yaw = static_cast<float>(yaw_ned);
+
+  current_waypoint_ned_->yawspeed = static_cast<float>(-msg->velocity.angular.z);
 
   fillPositionVelocityFields(*current_waypoint_ned_);
 }
@@ -185,8 +199,8 @@ void OffboardControl::publishOffboardControlHeartbeat()
   px4_msgs::msg::OffboardControlMode msg{};
   msg.position = true;
   msg.velocity = true;
-  msg.acceleration = false;
-  msg.attitude = false;
+  msg.acceleration = true;
+  msg.attitude = true;
   msg.body_rate = false;
   msg.timestamp = get_clock()->now().nanoseconds() / 1000;
   offboard_control_mode_pub_->publish(msg);

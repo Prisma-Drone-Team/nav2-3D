@@ -58,6 +58,16 @@ ControllerServer::ControllerServer(const rclcpp::NodeOptions& options)
 
     declare_parameter_if_not_declared(this, "slowdown_distance", rclcpp::ParameterValue(0.3));
     declare_parameter_if_not_declared(this, "min_speed", rclcpp::ParameterValue(0.0));
+
+    // Parametri filtro
+    declare_parameter_if_not_declared(this, "ref_jerk_max", rclcpp::ParameterValue(0.35));
+    declare_parameter_if_not_declared(this, "ref_acc_max", rclcpp::ParameterValue(0.75));
+    declare_parameter_if_not_declared(this, "ref_vel_max", rclcpp::ParameterValue(1.5));
+    declare_parameter_if_not_declared(this, "ref_omega", rclcpp::ParameterValue(1.0));
+    declare_parameter_if_not_declared(this, "ref_zita", rclcpp::ParameterValue(0.5));
+    declare_parameter_if_not_declared(this, "ref_yaw_jerk_max", rclcpp::ParameterValue(0.35));
+    declare_parameter_if_not_declared(this, "ref_yaw_acc_max", rclcpp::ParameterValue(0.75));
+    declare_parameter_if_not_declared(this, "ref_yaw_vel_max", rclcpp::ParameterValue(1.5));
 }
 
 ControllerServer::~ControllerServer() = default;
@@ -80,6 +90,15 @@ nav3d_util::CallbackReturn ControllerServer::on_configure(const rclcpp_lifecycle
 
     slowdown_distance_ = get_parameter("slowdown_distance").as_double();
     min_speed_ = get_parameter("min_speed").as_double();
+
+    ref_jerk_max_ = get_parameter("ref_jerk_max").as_double();
+    ref_acc_max_ = get_parameter("ref_acc_max").as_double();
+    ref_vel_max_ = get_parameter("ref_vel_max").as_double();
+    ref_omega_ = get_parameter("ref_omega").as_double();
+    ref_zita_ = get_parameter("ref_zita").as_double();
+    ref_yaw_jerk_max_ = get_parameter("ref_yaw_jerk_max").as_double();
+    ref_yaw_acc_max_ = get_parameter("ref_yaw_acc_max").as_double();
+    ref_yaw_vel_max_ = get_parameter("ref_yaw_vel_max").as_double();
 
     std::string speed_limit_topic = get_parameter("speed_limit_topic").as_string();
 
@@ -113,6 +132,14 @@ nav3d_util::CallbackReturn ControllerServer::on_configure(const rclcpp_lifecycle
     current_waypoint_index_ = 0;
     path_start_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
 
+    filter_initialized_ = false;
+    ref_state_.pos.setZero();
+    ref_state_.vel.setZero();
+    ref_state_.acc.setZero();
+    ref_state_.yaw = 0.0;
+    ref_state_.yaw_vel = 0.0;
+    ref_state_.yaw_acc = 0.0;
+
     return nav3d_util::CallbackReturn::SUCCESS;
 }
 
@@ -138,6 +165,7 @@ nav3d_util::CallbackReturn ControllerServer::on_cleanup(const rclcpp_lifecycle::
     current_path_.clear();
     current_waypoint_index_ = 0;
     path_start_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+    filter_initialized_ = false;
 
     return nav3d_util::CallbackReturn::SUCCESS;
 }
@@ -145,6 +173,10 @@ nav3d_util::CallbackReturn ControllerServer::on_cleanup(const rclcpp_lifecycle::
 nav3d_util::CallbackReturn ControllerServer::on_shutdown(const rclcpp_lifecycle::State&) {
     return nav3d_util::CallbackReturn::SUCCESS;
 }
+
+// ====================================================================
+//  COMPUTECONTROL (definizione che mancava)
+// ====================================================================
 
 void ControllerServer::computeControl() {
     try {
@@ -247,6 +279,163 @@ void ControllerServer::computeControl() {
     }
 }
 
+// ====================================================================
+//  FILTRO DI RIFERIMENTO
+// ====================================================================
+
+void ControllerServer::resetFilter(const geometry_msgs::msg::Pose & start_pose)
+{
+    ref_state_.pos = Eigen::Vector3d(
+        start_pose.position.x,
+        start_pose.position.y,
+        start_pose.position.z
+    );
+    ref_state_.vel.setZero();
+    ref_state_.acc.setZero();
+
+    ref_state_.yaw = tf2::getYaw(start_pose.orientation);
+    ref_state_.yaw_vel = 0.0;
+    ref_state_.yaw_acc = 0.0;
+
+    filter_initialized_ = true;
+}
+
+void ControllerServer::updateFilter(const geometry_msgs::msg::Pose & target_pose,
+                                     const geometry_msgs::msg::Twist & target_vel,
+                                     double dt)
+{
+    if (dt <= 0.0 || !filter_initialized_) return;
+
+    // Estrai posizione e yaw target
+    Eigen::Vector3d target_pos(target_pose.position.x,
+                               target_pose.position.y,
+                               target_pose.position.z);
+    double target_yaw = tf2::getYaw(target_pose.orientation);
+
+    // ---- Normalizza angoli ----
+    target_yaw = angles::normalize_angle(target_yaw);
+    ref_state_.yaw = angles::normalize_angle(ref_state_.yaw);
+
+    // ---- Errore minimo di yaw ----
+    double yaw_error = angles::shortest_angular_distance(ref_state_.yaw, target_yaw);
+
+    // ---- POSIZIONE: PD con feedforward di velocità ----
+    Eigen::Vector3d target_vel_vec(target_vel.linear.x,
+                                   target_vel.linear.y,
+                                   target_vel.linear.z);
+
+    Eigen::Vector3d pos_error = target_pos - ref_state_.pos;
+    Eigen::Vector3d vel_error = ref_state_.vel - target_vel_vec;
+    Eigen::Vector3d desired_acc = ref_omega_ * ref_omega_ * pos_error -
+                                  2.0 * ref_zita_ * ref_omega_ * vel_error;
+
+    // Limita jerk
+    Eigen::Vector3d jerk = (desired_acc - ref_state_.acc) / dt;
+    for (int i = 0; i < 3; ++i) {
+        if (std::abs(jerk(i)) > ref_jerk_max_) {
+            jerk(i) = std::copysign(ref_jerk_max_, jerk(i));
+        }
+    }
+    desired_acc = ref_state_.acc + jerk * dt;
+
+    // Limita accelerazione
+    for (int i = 0; i < 3; ++i) {
+        if (std::abs(desired_acc(i)) > ref_acc_max_) {
+            desired_acc(i) = std::copysign(ref_acc_max_, desired_acc(i));
+        }
+    }
+    ref_state_.acc = desired_acc;
+
+    // Integra velocità
+    Eigen::Vector3d new_vel = ref_state_.vel + ref_state_.acc * dt;
+    for (int i = 0; i < 3; ++i) {
+        if (std::abs(new_vel(i)) > ref_vel_max_) {
+            new_vel(i) = std::copysign(ref_vel_max_, new_vel(i));
+        }
+    }
+    ref_state_.vel = new_vel;
+
+    // Integra posizione
+    ref_state_.pos += ref_state_.vel * dt;
+
+    // ---- YAW: PD con feedforward, attrito e limitazione adattiva ----
+    double target_yaw_vel = target_vel.angular.z;
+    double yaw_vel_error = ref_state_.yaw_vel - target_yaw_vel;
+
+    // Attrito extra per smorzare oscillazioni
+    const double damping = 0.1;
+
+    double desired_yaw_acc = ref_omega_ * ref_omega_ * yaw_error -
+                             2.0 * ref_zita_ * ref_omega_ * yaw_vel_error
+                             - damping * ref_state_.yaw_vel;
+
+    // Limita jerk
+    double yaw_jerk = (desired_yaw_acc - ref_state_.yaw_acc) / dt;
+    if (std::abs(yaw_jerk) > ref_yaw_jerk_max_) {
+        yaw_jerk = std::copysign(ref_yaw_jerk_max_, yaw_jerk);
+    }
+    desired_yaw_acc = ref_state_.yaw_acc + yaw_jerk * dt;
+
+    // Limita accelerazione
+    if (std::abs(desired_yaw_acc) > ref_yaw_acc_max_) {
+        desired_yaw_acc = std::copysign(ref_yaw_acc_max_, desired_yaw_acc);
+    }
+    ref_state_.yaw_acc = desired_yaw_acc;
+
+    // ---- Limita velocità angolare in modo adattivo ----
+    double yaw_vel_limit = ref_yaw_vel_max_;
+
+    // Se l'errore è piccolo, riduci la velocità massima per evitare overshoot
+    if (std::abs(yaw_error) < 0.2) {
+        yaw_vel_limit = ref_yaw_vel_max_ * std::max(0.1, std::abs(yaw_error) / 0.2);
+    }
+
+    double new_yaw_vel = ref_state_.yaw_vel + ref_state_.yaw_acc * dt;
+    if (std::abs(new_yaw_vel) > yaw_vel_limit) {
+        new_yaw_vel = std::copysign(yaw_vel_limit, new_yaw_vel);
+    }
+    ref_state_.yaw_vel = new_yaw_vel;
+
+    ref_state_.yaw += ref_state_.yaw_vel * dt;
+    ref_state_.yaw = angles::normalize_angle(ref_state_.yaw);
+}
+
+nav3d_msgs::msg::TrajectoryPoint ControllerServer::getFilteredSetpoint()
+{
+    nav3d_msgs::msg::TrajectoryPoint out;
+
+    geometry_msgs::msg::Pose pose;
+    pose.position.x = ref_state_.pos.x();
+    pose.position.y = ref_state_.pos.y();
+    pose.position.z = ref_state_.pos.z();
+
+    tf2::Quaternion q;
+    q.setRPY(0.0, 0.0, ref_state_.yaw);
+    pose.orientation = tf2::toMsg(q);
+
+    geometry_msgs::msg::Twist twist;
+    twist.linear.x = ref_state_.vel.x();
+    twist.linear.y = ref_state_.vel.y();
+    twist.linear.z = ref_state_.vel.z();
+    twist.angular.z = ref_state_.yaw_vel;
+
+    geometry_msgs::msg::Accel accel;
+    accel.linear.x = ref_state_.acc.x();
+    accel.linear.y = ref_state_.acc.y();
+    accel.linear.z = ref_state_.acc.z();
+
+    out.pose = pose;
+    out.velocity = twist;
+    out.acceleration = accel;
+    out.time_from_start = toMsgDuration(this->now() - path_start_time_);
+
+    return out;
+}
+
+// ====================================================================
+//  GENERAZIONE TRAIETTORIA
+// ====================================================================
+
 void ControllerServer::generateTimedTrajectory(const nav_msgs::msg::Path& path) {
     if (path.poses.empty()) {
         throw nav3d_core::InvalidPath("Path is empty.");
@@ -284,6 +473,14 @@ void ControllerServer::generateTimedTrajectory(const nav_msgs::msg::Path& path) 
         poses[i].header.stamp = t;
         current_path_.emplace_back(t, poses[i]);
     }
+
+    // Inizializza il filtro con la posizione corrente
+    geometry_msgs::msg::PoseStamped current_pose;
+    if (nav3d_util::getCurrentPose(current_pose, *tf_buffer_, global_frame_, robot_base_frame_, transform_tolerance_)) {
+        resetFilter(current_pose.pose);
+    } else {
+        resetFilter(poses[0].pose);
+    }
 }
 
 std::optional<nav3d_msgs::msg::TrajectoryPoint> ControllerServer::getCurrentCommand() {
@@ -292,20 +489,36 @@ std::optional<nav3d_msgs::msg::TrajectoryPoint> ControllerServer::getCurrentComm
     }
 
     const rclcpp::Time tnow = now();
+    const double dt = 1.0 / std::max(1e-3, controller_frequency_);
 
     if (tnow <= current_path_.front().first) {
-        nav3d_msgs::msg::TrajectoryPoint out;
-        out.time_from_start = toMsgDuration(current_path_.front().first - path_start_time_);
-        out.pose = current_path_.front().second.pose;
-        out.velocity = geometry_msgs::msg::Twist{};
-        return out;
+        geometry_msgs::msg::PoseStamped current_pose;
+        if (nav3d_util::getCurrentPose(current_pose, *tf_buffer_, global_frame_, robot_base_frame_, transform_tolerance_)) {
+            resetFilter(current_pose.pose);
+        }
+        return getFilteredSetpoint();
     }
 
-    if (tnow >= current_path_.back().first || current_path_.size() == 1) {
-        nav3d_msgs::msg::TrajectoryPoint out;
-        out.time_from_start = toMsgDuration(current_path_.back().first - path_start_time_);
-        out.pose = current_path_.back().second.pose;
-        out.velocity = geometry_msgs::msg::Twist{};
+    if (tnow >= current_path_.back().first) {
+        const auto& goal = current_path_.back().second;
+        geometry_msgs::msg::Twist zero_twist;
+        updateFilter(goal.pose, zero_twist, dt);
+
+        auto out = getFilteredSetpoint();
+
+        const auto& goal_pos = goal.pose.position;
+        double dx = ref_state_.pos.x() - goal_pos.x;
+        double dy = ref_state_.pos.y() - goal_pos.y;
+        double dz = ref_state_.pos.z() - goal_pos.z;
+        double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+        if (dist < xyz_goal_tolerance_) {
+            out.velocity.linear.x = 0.0;
+            out.velocity.linear.y = 0.0;
+            out.velocity.linear.z = 0.0;
+            out.velocity.angular.z = 0.0;
+        }
+
         return out;
     }
 
@@ -317,68 +530,63 @@ std::optional<nav3d_msgs::msg::TrajectoryPoint> ControllerServer::getCurrentComm
     const auto& a = current_path_[current_waypoint_index_];
     const auto& b = current_path_[current_waypoint_index_ + 1];
 
-    const double dt = (b.first - a.first).seconds();
-    const double alpha = std::clamp((tnow - a.first).seconds() / std::max(1e-6, dt), 0.0, 1.0);
+    const double segment_dt = (b.first - a.first).seconds();
+    const double alpha = std::clamp((tnow - a.first).seconds() / std::max(1e-6, segment_dt), 0.0, 1.0);
 
-    const auto& p0 = a.second.pose.position;
-    const auto& p1 = b.second.pose.position;
-
-    geometry_msgs::msg::Pose pose;
-    pose.position.x = p0.x + alpha * (p1.x - p0.x);
-    pose.position.y = p0.y + alpha * (p1.y - p0.y);
-    pose.position.z = p0.z + alpha * (p1.z - p0.z);
+    geometry_msgs::msg::Pose target_pose;
+    target_pose.position.x = a.second.pose.position.x + alpha * (b.second.pose.position.x - a.second.pose.position.x);
+    target_pose.position.y = a.second.pose.position.y + alpha * (b.second.pose.position.y - a.second.pose.position.y);
+    target_pose.position.z = a.second.pose.position.z + alpha * (b.second.pose.position.z - a.second.pose.position.z);
 
     tf2::Quaternion q0, q1;
     tf2::fromMsg(a.second.pose.orientation, q0);
     tf2::fromMsg(b.second.pose.orientation, q1);
     tf2::Quaternion q = q0.slerp(q1, alpha);
     q.normalize();
-    pose.orientation = tf2::toMsg(q);
+    target_pose.orientation = tf2::toMsg(q);
 
-    geometry_msgs::msg::Twist tw;
-    tw.linear.x = (p1.x - p0.x) / std::max(1e-6, dt);
-    tw.linear.y = (p1.y - p0.y) / std::max(1e-6, dt);
-    tw.linear.z = (p1.z - p0.z) / std::max(1e-6, dt);
+    geometry_msgs::msg::Twist target_vel;
+    target_vel.linear.x = (b.second.pose.position.x - a.second.pose.position.x) / std::max(1e-6, segment_dt);
+    target_vel.linear.y = (b.second.pose.position.y - a.second.pose.position.y) / std::max(1e-6, segment_dt);
+    target_vel.linear.z = (b.second.pose.position.z - a.second.pose.position.z) / std::max(1e-6, segment_dt);
 
     const double yaw0 = tf2::getYaw(a.second.pose.orientation);
     const double yaw1 = tf2::getYaw(b.second.pose.orientation);
     const double dyaw = angles::shortest_angular_distance(yaw0, yaw1);
-    tw.angular.z = dyaw / std::max(1e-6, dt);
+    target_vel.angular.z = dyaw / std::max(1e-6, segment_dt);
 
     const auto& goal = current_path_.back().second.pose.position;
-    const double dxg = goal.x - pose.position.x;
-    const double dyg = goal.y - pose.position.y;
-    const double dzg = goal.z - pose.position.z;
-    const double dist_to_goal = std::sqrt(dxg * dxg + dyg * dyg + dzg * dzg);
+    const double dxg = goal.x - target_pose.position.x;
+    const double dyg = goal.y - target_pose.position.y;
+    const double dzg = goal.z - target_pose.position.z;
+    const double dist_to_goal = std::sqrt(dxg*dxg + dyg*dyg + dzg*dzg);
 
     const double dslow = std::max(1e-3, slowdown_distance_);
     const double scale = std::clamp(dist_to_goal / dslow, 0.0, 1.0);
 
-    tw.linear.x *= scale;
-    tw.linear.y *= scale;
-    tw.linear.z *= scale;
-    tw.angular.z *= scale;
+    target_vel.linear.x *= scale;
+    target_vel.linear.y *= scale;
+    target_vel.linear.z *= scale;
+    target_vel.angular.z *= scale;
 
     if (dist_to_goal <= xyz_goal_tolerance_) {
-        tw.linear.x = 0.0;
-        tw.linear.y = 0.0;
-        tw.linear.z = 0.0;
-        tw.angular.z = 0.0;
-    } else if (min_speed_ > 0.0) {
-        const double vmag =
-            std::sqrt(tw.linear.x * tw.linear.x + tw.linear.y * tw.linear.y + tw.linear.z * tw.linear.z);
-        if (vmag > 1e-6 && vmag < min_speed_) {
-            const double k = min_speed_ / vmag;
-            tw.linear.x *= k;
-            tw.linear.y *= k;
-            tw.linear.z *= k;
-        }
+        target_vel.linear.x = 0.0;
+        target_vel.linear.y = 0.0;
+        target_vel.linear.z = 0.0;
+        target_vel.angular.z = 0.0;
     }
 
-    nav3d_msgs::msg::TrajectoryPoint out;
-    out.time_from_start = toMsgDuration(tnow - path_start_time_);
-    out.pose = pose;
-    out.velocity = tw;
+    updateFilter(target_pose, target_vel, dt);
+
+    auto out = getFilteredSetpoint();
+
+    if (dist_to_goal <= xyz_goal_tolerance_) {
+        out.velocity.linear.x = 0.0;
+        out.velocity.linear.y = 0.0;
+        out.velocity.linear.z = 0.0;
+        out.velocity.angular.z = 0.0;
+    }
+
     return out;
 }
 
